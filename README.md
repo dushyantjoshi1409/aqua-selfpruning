@@ -7,53 +7,43 @@ Scikit-learn is used **only** to load the digits dataset — not for training, m
 ## Quick Start
 
 ```bash
-# Install dependencies (Python 3.10+)
-pip install numpy matplotlib scikit-learn
+pip install -r requirements.txt
 
-# Or with uv:
-uv pip install numpy matplotlib scikit-learn
+# Run everything (tests + training + sweep):
+python run_all.py
+
+# Or run just the tests (< 10 seconds):
+python run_all.py --quick
 ```
 
-## Run Commands
+## Run Commands (individual parts)
 
-### Gradient-check tests (Part 1)
+### Part 1: Gradient Checks
 
 ```bash
-python -m tests.test_gradients
+python -m tests.test_gradients    # 34 numerical gradient checks across 17 ops
+python -m tests.test_masked       # masked-weight correctness + optimizer state tests
 ```
 
-Verifies all 17 differentiable operations against finite-difference numerical gradients.
-
-### Masked-weight correctness tests (Part 1)
+### Part 2: Basic MLP Training
 
 ```bash
-python -m tests.test_masked
+python -m train.train_basic       # 64→128→64→10 MLP on digits, Adam
 ```
 
-Tests that masked weights contribute zero to forward pass, gradients are available for importance scoring, the optimizer skips masked weights, and optimizer state resets on mask transitions.
+Saves learning curves to `results/learning_curve.png`.
 
-### Basic training (Part 2)
+### Part 3: Self-Pruning Training
 
 ```bash
-python -m train.train_basic
+python -m train.train_prune                              # saliency, 90% sparsity
+python -m train.train_prune --regrowth --sparsity 0.9    # with dynamic regrowth
+python -m train.train_prune --sparsity 0.95 --method magnitude
 ```
 
-Trains a 64→128→64→10 MLP on the digits dataset with Adam.  Saves learning curves to `results/learning_curve.png`.
+Saves training curves to `results/pruning_training.png`.
 
-### Self-pruning training (Part 3)
-
-```bash
-python -m train.train_prune
-```
-
-Trains the same MLP with gradual saliency-based pruning to 90% sparsity.  Saves training curves to `results/pruning_training.png`.
-
-Options:
-```bash
-python -m train.train_prune --sparsity 0.95 --method magnitude --regrowth
-```
-
-### Pareto sweep (Part 4)
+### Part 4: Pareto Sweep
 
 ```bash
 python -m train.pareto_sweep
@@ -72,37 +62,40 @@ Sweeps 5 sparsity levels × 2 pruning methods × 5 seeds (50 runs total).  Gener
 engine/
   tensor.py          Reverse-mode autodiff engine (Tensor class, all ops, cross-entropy)
 nn/
-  layers.py          Linear layer (with mask), ReLU, Sigmoid, GELU, Sequential, MLP builder
+  layers.py          Linear layer (with mask), activations, Sequential, MLP builder
   optim.py           Adam and SGD with mask-aware state management
 prune/
   pruner.py          Importance criteria, cubic schedule, GradualPruner with regrowth
 train/
   data.py            Dataset loading (sklearn for data only)
   train_basic.py     Part 2: basic MLP training
-  train_prune.py     Part 3: self-pruning training
+  train_prune.py     Part 3: self-pruning training with optional regrowth
   pareto_sweep.py    Part 4: Pareto sweep and evidence generation
 tests/
-  test_gradients.py  Gradient checking for all operations
-  test_masked.py     Masked-weight and optimizer state correctness
+  test_gradients.py  Numerical gradient checking for all operations
+  test_masked.py     Masked-weight, optimizer state, and stale-v bug tests
 results/             Committed plots and raw data
-DESIGN.md            Derivations and design reasoning
+DESIGN.md            Derivations, theory, and design reasoning
+run_all.py           One-command full reproducibility
 ```
 
 ## Key Design Decisions
 
-1. **Importance criterion**: Taylor saliency |w · ∂L/∂w| — first-order approximation of loss change from removing a connection.  Outperforms magnitude-only by 1.1 percentage points at 90% sparsity.
+1. **Importance criterion**: Taylor saliency `|w · ∂L/∂w|` — first-order approximation of loss change from removing a connection, with connections to Optimal Brain Damage (LeCun et al., 1989) and the Fisher Information Matrix.  Outperforms magnitude-only by 1.1pp at 90% sparsity and 1.7pp at 95%.
 
-2. **Masked-weight gradients**: Gradients are computed normally for all positions (the matmul derivative does not depend on weight values), then zeroed before the optimizer step.  This preserves importance information for regrowth while preventing optimizer state corruption.
+2. **Masked-weight gradients**: Gradients flow normally through masked positions because `∂(x @ W)/∂W = x^T @ grad_output` does not depend on `W`'s values.  Gradients are zeroed before the optimizer step, not during backward — preserving the signal needed for importance scoring and regrowth.
 
-3. **Optimizer state reset**: When a weight's mask transitions (active↔pruned), Adam's moment estimates (m, v) are reset to zero.  Without this, stale v from before pruning suppresses the effective learning rate of revived weights by ~10×.
+3. **Optimizer state reset on mask transition**: When a weight's mask changes (active↔pruned), Adam's moment estimates `(m, v)` are reset to zero.  Without this, stale `v` from before pruning suppresses the learning rate of revived weights by ~10× (see `test_bug_demonstration` for exact numbers).
 
-4. **Weight initialization**: Kaiming He (scale = √(2/fan_in)) for networks with ReLU activations.
+4. **Dynamic regrowth**: Pruned connections with high gradient magnitude can be reactivated, allowing the network to explore alternative sparse topologies during training.  Related to RigL (Evci et al., 2020) and Sparse Evolutionary Training (Mocanu et al., 2018).
 
-See [DESIGN.md](DESIGN.md) for full derivations.
+5. **Cubic sparsity schedule** (Zhu & Gupta, 2017): Prunes aggressively early when redundancy is highest, then slows near the target.  Better than linear or step schedules because the network has more training budget to recover from early pruning.
+
+See [DESIGN.md](DESIGN.md) for full derivations, second-order analysis, and the multi-tenant serving architecture.
 
 ## Reproducibility
 
-All random seeds are fixed.  Running the commands above from a clean clone should reproduce the reported numbers within floating-point variance.
+All random seeds are fixed.  Running the commands above from a clean clone reproduces the reported numbers within floating-point variance.  `run_all.py` exercises the full pipeline end-to-end.
 
 ## Results Summary
 
@@ -113,3 +106,5 @@ All random seeds are fixed.  Running the commands above from a clean clone shoul
 | 75%      | 0.973 ± 0.005 | 0.974 ± 0.007 | — | 0.250 |
 | 90%      | 0.964 ± 0.004 | 0.953 ± 0.010 | — | 0.100 |
 | 95%      | 0.949 ± 0.007 | 0.932 ± 0.010 | — | 0.050 |
+
+At 90% sparsity: **96.4% accuracy retained, 10× FLOP reduction, saliency beats magnitude by 1.1pp.**
