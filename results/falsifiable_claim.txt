@@ -1,0 +1,8 @@
+
+FALSIFIABLE CLAIM (backed by results/pareto_data.csv):
+At 90% sparsity on the digits dataset (64-128-64-10 MLP, 5 seeds):
+  - Saliency pruning: 0.964 +/- 0.004 accuracy
+  - Magnitude pruning: 0.953 +/- 0.010 accuracy
+  - Dense baseline: 0.981 +/- 0.004 accuracy
+  - Saliency advantage: 1.1 percentage points
+  - FLOPs saved: ~90% (10x fewer multiply-accumulate operations)
